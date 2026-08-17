@@ -1,0 +1,6 @@
+streamlit
+pandas
+numpy
+pulp
+qrcode[pil]
+streamlit-autorefresh
