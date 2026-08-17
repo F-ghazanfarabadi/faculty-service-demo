@@ -1,0 +1,4 @@
+id,location,description,category,safety,affected_people,class_disruption,waiting_time,priority,priority_level,status,assigned_worker,timestamp
+C001,A11,خرابی کولر کلاس,تأسیسات,1,9,9,1,4.21,متوسط,In Progress,W2,2026-08-15T18:35:40.163658
+C002,A11,خرابی کولر کلاس,تأسیسات,1,9,9,1,4.21,متوسط,Completed,W2,2026-08-15T18:37:53.643672
+C003,A11,خرابی کولر کلاس,تأسیسات,5,9,9,1,6.29,بالا,Assigned,W5,2026-08-15T18:44:11.169201
