@@ -1,6 +1,6 @@
-# سامانه هوشمند مدیریت و تخصیص شکایات دانشکده — Demo
+# smart faculty service management Demo
 
-## نصب و اجرا
+## install
 
 ```bash
 pip install -r requirements.txt
