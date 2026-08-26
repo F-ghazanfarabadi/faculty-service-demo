@@ -1,12 +1,34 @@
 # -*- coding: utf-8 -*-
 """
-ماژول امتیازدهی: تبدیل پاسخ‌های کاربر (گزینه‌های متنی) به امتیازهای عددی معیارها،
-محاسبه امتیاز معیار زمان انتظار بر اساس زمان سپری‌شده، و تعیین سطح اولویت نهایی.
+ماژول امتیازدهی جدید:
+
+معیار 1: Safety (ایمنی)
+  - هیچ تأثیری بر ایمنی ندارد: 1
+  - ممکن است در آینده باعث مشکل ایمنی شود: 5
+  - در حال حاضر خطر ایمنی ایجاد می‌کند: 7
+  - خطر ایمنی جدی و فوری ایجاد می‌کند: 9
+
+معیار 2: Class_Disruption (اختلال در کلاس)
+  - خیر، هیچ اختلالی ایجاد نکرده: 1
+  - اختلال جزئی ایجاد کرده: 3
+  - اختلال قابل توجه ایجاد کرده: 5
+  - برگزاری کلاس را مختل یا متوقف کرده: 9
+
+معیار 3: Infrastructure_Criticality (بحرانی‌بودن خدمت)
+  - خدمت غیر بحرانی (نظافت، تزئین و تجمیل): 1
+  - خدمت نسبتاً بحرانی (نظام‌های کمکی): 5
+  - خدمت بسیار بحرانی (برق، آب، تأسیسات اساسی): 8
+  - خدمت حیاتی (سیستم‌های فوری، ایمنی): 10
+
+ضریب زمانی (Waiting Time Multiplier):
+  - هر روز تاخیر افزایش میدهد
+  - فرمول: multiplier = 1 + 0.1 * days_delayed
+  - مثال: 1 روز = 1.1، 3 روز = 1.3، 10 روز = 2.0
 """
 
 from datetime import datetime
 
-# ---- معیار ۱: تأثیر بر ایمنی ----
+# ---- معیار ۱: Safety (ایمنی) ----
 SAFETY_OPTIONS = {
     "هیچ تأثیری بر ایمنی ندارد": 1,
     "ممکن است در آینده باعث مشکل ایمنی شود": 5,
@@ -14,16 +36,7 @@ SAFETY_OPTIONS = {
     "خطر ایمنی جدی و فوری ایجاد می‌کند": 9,
 }
 
-# ---- معیار ۲: تعداد افراد متأثر ----
-AFFECTED_PEOPLE_OPTIONS = {
-    "1 تا 5 نفر": 1,
-    "6 تا 10 نفر": 3,
-    "11 تا 15 نفر": 5,
-    "16 تا 25 نفر": 7,
-    "26 تا 30 نفر": 9,
-}
-
-# ---- معیار ۳: اختلال در برگزاری کلاس ----
+# ---- معیار ۲: Class_Disruption (اختلال در کلاس) ----
 CLASS_DISRUPTION_OPTIONS = {
     "خیر، هیچ اختلالی ایجاد نکرده": 1,
     "اختلال جزئی ایجاد کرده": 3,
@@ -31,52 +44,89 @@ CLASS_DISRUPTION_OPTIONS = {
     "برگزاری کلاس را مختل یا متوقف کرده": 9,
 }
 
-# دسته‌بندی مشکل — این فیلد در مشخصات اصلی برای فرم ذکر نشده بود اما برای مرحله
-# تخصیص (تطبیق تخصص کارمند با نوع مشکل) ضروری است؛ گزینه‌ها منطبق با ستون skill
-# در workers.csv انتخاب شده‌اند.
+# ---- معیار ۳: Infrastructure_Criticality (بحرانی‌بودن خدمت) ----
+INFRASTRUCTURE_OPTIONS = {
+    "خدمت غیر بحرانی (نظافت، تزئین و تجمیل)": 1,
+    "خدمت نسبتاً بحرانی (نظام‌های کمکی)": 5,
+    "خدمت بسیار بحرانی (برق، آب، تأسیسات اساسی)": 8,
+    "خدمت حیاتی (سیستم‌های فوری، ایمنی)": 10,
+}
+
+# دسته‌بندی خدمات (برای تخصیص به کارکنان)
 CATEGORY_OPTIONS = ["برق", "تأسیسات", "نظافت", "عمومی"]
 
 
-def waiting_time_score(timestamp_str: str, now: datetime = None) -> int:
+def compute_waiting_time_multiplier(timestamp_str: str, now: datetime = None) -> float:
     """
-    امتیاز معیار زمان انتظار بر اساس فاصله زمانی بین لحظه ثبت شکایت و اکنون.
-    این مقیاس فرضی است و صرفاً برای Demo استفاده می‌شود؛ در نسخه پژوهشی نهایی
-    باید با منبع علمی یا نظر خبره اعتبارسنجی شود.
+    محاسبه ضریب زمانی بر اساس روزهای سپری‌شده
+    
+    فرمول: multiplier = 1 + 0.1 * days_delayed
+    - روز 0: 1.0×
+    - روز 1: 1.1×
+    - روز 3: 1.3×
+    - روز 5: 1.5×
+    - روز 10: 2.0×
+    
+    این ضریب در محاسبه Priority Score **ضرب** میشود
     """
     if now is None:
         now = datetime.now()
-    ts = datetime.fromisoformat(timestamp_str)
-    hours = (now - ts).total_seconds() / 3600
-
-    if hours < 1:
-        return 1
-    elif hours < 4:
-        return 3
-    elif hours < 8:
-        return 5
-    elif hours < 24:
-        return 7
-    else:
-        return 9
+    
+    try:
+        ts = datetime.fromisoformat(timestamp_str)
+    except (ValueError, TypeError):
+        return 1.0
+    
+    days_delayed = (now - ts).days
+    multiplier = 1.0 + (0.1 * days_delayed)
+    
+    return max(1.0, multiplier)  # حداقل 1.0
 
 
-def compute_priority(safety, affected_people, class_disruption, waiting_time, weights):
+def compute_priority_score(safety: int, class_disruption: int, infrastructure: int, 
+                          weights: dict, waiting_multiplier: float = 1.0) -> float:
     """
-    محاسبه Priority Score نهایی از ترکیب وزنی چهار معیار.
-    weights: دیکشنری خروجی ahp.compute_ahp_weights()["weights"]
+    محاسبه Priority Score نهایی
+    
+    فرمول:
+    Priority = (w_s * Safety + w_cd * Class_Disruption + w_ic * Infrastructure) × waiting_multiplier
+    
+    Parameters
+    ----------
+    safety : int (1-9)
+        امتیاز معیار ایمنی
+    class_disruption : int (1-9)
+        امتیاز معیار اختلال در کلاس
+    infrastructure : int (1-10)
+        امتیاز معیار بحرانی‌بودن خدمت
+    weights : dict
+        خروجی ahp.compute_ahp_weights()["weights"]
+        شامل keys: "Safety", "Class_Disruption", "Infrastructure_Criticality"
+    waiting_multiplier : float
+        ضریب زمانی (پیش‌فرض: 1.0 = بدون تاخیر)
+    
+    Returns
+    -------
+    float
+        Priority Score نهایی
     """
-    return (
-        weights["Safety"] * safety
-        + weights["Affected_People"] * affected_people
-        + weights["Class_Disruption"] * class_disruption
-        + weights["Waiting_Time"] * waiting_time
+    base_score = (
+        weights["Safety"] * safety +
+        weights["Class_Disruption"] * class_disruption +
+        weights["Infrastructure_Criticality"] * infrastructure
     )
+    
+    final_score = base_score * waiting_multiplier
+    return final_score
 
 
-def priority_level(score: float):
+def priority_level(score: float) -> tuple:
     """
-    تبدیل Priority Score به سطح اولویت قابل نمایش (برچسب + ایموجی).
-    آستانه‌ها فرضی و مخصوص Demo هستند.
+    تبدیل Priority Score به سطح اولویت
+    
+    Returns
+    -------
+    tuple: (level_name, emoji)
     """
     if score >= 7:
         return "بحرانی", "🔴"
@@ -86,3 +136,24 @@ def priority_level(score: float):
         return "متوسط", "🟡"
     else:
         return "پایین", "🟢"
+
+
+if __name__ == "__main__":
+    # تست
+    from ahp_updated import compute_ahp_weights
+    
+    weights = compute_ahp_weights()["weights"]
+    print("وزن‌ها:", weights)
+    
+    # تست: Safety=9, Class_Disruption=5, Infrastructure=8, بدون تاخیر
+    score_no_wait = compute_priority_score(9, 5, 8, weights, 1.0)
+    print(f"\nتست 1 (بدون تاخیر): {score_no_wait:.2f} - {priority_level(score_no_wait)}")
+    
+    # تست: همان، اما با 5 روز تاخیر
+    multiplier_5days = 1.0 + (0.1 * 5)
+    score_5days = compute_priority_score(9, 5, 8, weights, multiplier_5days)
+    print(f"تست 2 (5 روز تاخیر، ضریب={multiplier_5days}): {score_5days:.2f} - {priority_level(score_5days)}")
+    
+    # تست: Safety=3, Class_Disruption=1, Infrastructure=1
+    score_low = compute_priority_score(3, 1, 1, weights, 1.0)
+    print(f"تست 3 (کم‌اهمیت): {score_low:.2f} - {priority_level(score_low)}")

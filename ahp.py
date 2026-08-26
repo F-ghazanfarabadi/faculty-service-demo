@@ -1,47 +1,38 @@
 # -*- coding: utf-8 -*-
 """
-ماژول محاسبات AHP (Analytic Hierarchy Process)
-شامل: محاسبه وزن معیارها با روش مجموع نرمال‌شده ستون‌ها (NCS)،
-محاسبه لاندا-ماکس، شاخص سازگاری (CI) و نرخ سازگاری (CR).
+ماژول AHP با معیارهای جدید استاد:
+- Safety (ایمنی)
+- Class_Disruption (اختلال در کلاس)  
+- Infrastructure_Criticality (بحرانی‌بودن خدمت)
+
+وزن‌ها بر اساس نسبت‌های داده‌شده:
+  Safety : Class_Disruption = 3:1
+  Safety : Infrastructure_Criticality = 4:1
+  Class_Disruption : Infrastructure_Criticality = 2:1
 """
 
 import numpy as np
 
-# شاخص تصادفی (Random Index) ساعتی - جدول استاندارد Saaty
+# شاخص تصادفی Saaty
 RI_TABLE = {1: 0.00, 2: 0.00, 3: 0.58, 4: 0.90, 5: 1.12, 6: 1.24, 7: 1.32, 8: 1.41, 9: 1.45}
 
-# ترتیب معیارها دقیقاً مطابق مشخصات Demo
-CRITERIA_NAMES = ["Safety", "Affected_People", "Class_Disruption", "Waiting_Time"]
+# معیارهای جدید
+CRITERIA_NAMES = ["Safety", "Class_Disruption", "Infrastructure_Criticality"]
 
-# ماتریس مقایسه زوجی پیش‌فرض Demo (وزن‌ها فرضی هستند و بعداً با نظر خبره جایگزین می‌شوند)
+# ماتریس مقایسه زوجی بر اساس نسبت‌های استاد:
+# S : CD = 3:1  →  S/CD = 3
+# S : IC = 4:1  →  S/IC = 4
+# CD : IC = 2:1 →  CD/IC = 2
 PAIRWISE_MATRIX = [
-    [1,     3,     3,     5],
-    [1 / 3, 1,     1,     3],
-    [1 / 3, 1,     1,     3],
-    [1 / 5, 1 / 3, 1 / 3, 1],
+    [1,     3,     4    ],   # Safety vs [S, CD, IC]
+    [1/3,   1,     2    ],   # Class_Disruption vs [S, CD, IC]
+    [1/4,   1/2,   1    ],   # Infrastructure_Criticality vs [S, CD, IC]
 ]
 
 
 def compute_ahp_weights(matrix=None, criteria_names=None):
     """
-    محاسبه وزن معیارها با روش مجموع نرمال‌شده ستون‌ها (Normalized Column Sum)
-    و اعتبارسنجی سازگاری قضاوت‌ها با محاسبه Consistency Ratio.
-
-    Parameters
-    ----------
-    matrix : list[list[float]] یا None
-        ماتریس مقایسه زوجی n×n. اگر None باشد، از PAIRWISE_MATRIX پیش‌فرض استفاده می‌شود.
-    criteria_names : list[str] یا None
-        نام معیارها به همان ترتیب سطرها/ستون‌های ماتریس.
-
-    Returns
-    -------
-    dict شامل:
-        weights: dict {نام معیار: وزن}
-        lambda_max: بزرگ‌ترین مقدار ویژه ماتریس
-        CI: شاخص سازگاری
-        CR: نرخ سازگاری
-        is_consistent: True اگر CR < 0.1
+    محاسبه وزن معیارها با روش NCS + بررسی سازگاری
     """
     if matrix is None:
         matrix = PAIRWISE_MATRIX
@@ -56,14 +47,12 @@ def compute_ahp_weights(matrix=None, criteria_names=None):
     if len(criteria_names) != n:
         raise ValueError("تعداد نام معیارها باید با ابعاد ماتریس برابر باشد.")
 
-    # مرحله ۱ و ۲: نرمال‌سازی هر ستون بر مجموع همان ستون
+    # نرمال‌سازی
     col_sums = A.sum(axis=0)
     normalized = A / col_sums
-
-    # مرحله ۳: میانگین هر سطر = وزن همان معیار
     weights = normalized.mean(axis=1)
 
-    # محاسبه Aw و لاندا-ماکس برای آزمون سازگاری
+    # محاسبه سازگاری
     Aw = A @ weights
     lambdas = Aw / weights
     lambda_max = float(lambdas.mean())
@@ -82,12 +71,13 @@ def compute_ahp_weights(matrix=None, criteria_names=None):
 
 
 if __name__ == "__main__":
-    # اجرای مستقل برای تست سریع محاسبات
     result = compute_ahp_weights()
-    print("وزن معیارها:")
+    print("وزن معیارها (جدید):")
     for name, w in result["weights"].items():
-        print(f"  {name}: {w:.3f}")
-    print(f"Lambda max: {result['lambda_max']:.4f}")
-    print(f"CI: {result['CI']:.4f}")
-    print(f"CR: {result['CR']:.4f}")
-    print(f"سازگار: {result['is_consistent']}")
+        print(f"  {name}: {w:.4f}")
+    print(f"\nنسبت‌های تائید:")
+    w = result["weights"]
+    print(f"  Safety : Class_Disruption = {w['Safety']/w['Class_Disruption']:.2f}:1 (انتظار: 3:1)")
+    print(f"  Safety : Infrastructure = {w['Safety']/w['Infrastructure_Criticality']:.2f}:1 (انتظار: 4:1)")
+    print(f"  Class_Disruption : Infrastructure = {w['Class_Disruption']/w['Infrastructure_Criticality']:.2f}:1 (انتظار: 2:1)")
+    print(f"\nCR: {result['CR']:.4f} (سازگار: {result['is_consistent']})")

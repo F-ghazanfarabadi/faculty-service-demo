@@ -1,386 +1,217 @@
-# -*- coding: utf-8 -*-
+#-*- coding: utf-8 -*-
 """
-سامانه هوشمند مدیریت و تخصیص شکایات دانشکده — Demo
-====================================================
-معماری سه‌نقشی روی یک اپ واحد (بدون نیاز به سه دیپلوی جدا):
+سامانه هوشمند مدیریت شکایات دانشکده — Demo
 
-    لینک دانشجو (ثبت شکایت):   .../?location=A11
-    لینک کارکنان:              .../?role=staff
-    لینک مدیر پروژه (داشبورد):  .../?role=admin
+فرم جدید برای دانشجویان:
+1. مکان شکایت
+2. ایمنی (Safety)
+3. اختلال در کلاس (Class_Disruption)
+4. بحرانی‌بودن خدمت (Infrastructure_Criticality)
+5. دسته‌بندی خدمات
 
-هر نقش فقط صفحه‌ی مخصوص خودش را می‌بیند؛ نه نوار کناری مشترک وجود دارد و
-نه امکان پرش بین نقش‌ها از داخل اپ. دانشجوی ثبت‌کننده‌ی شکایت هیچ‌گاه
-جزئیات مدل AHP/PuLP، هویت کارکنان یا پنل آن‌ها را نمی‌بیند.
+سپس نمایش Score با ضریب زمانی
 """
 
-import os
-import time
-from datetime import datetime
-
-import pandas as pd
 import streamlit as st
-
-from ahp import compute_ahp_weights
-from scoring import (
-    SAFETY_OPTIONS,
-    AFFECTED_PEOPLE_OPTIONS,
+import pandas as pd
+import json
+from datetime import datetime
+from ahp_updated import compute_ahp_weights
+from scoring_updated import (
+    SAFETY_OPTIONS, 
     CLASS_DISRUPTION_OPTIONS,
+    INFRASTRUCTURE_OPTIONS,
     CATEGORY_OPTIONS,
-    waiting_time_score,
-    compute_priority,
-    priority_level,
-)
-from optimization import assign_complaints
-
-# ============================================================
-# تنظیمات پایه
-# ============================================================
-DATA_DIR = "data"
-COMPLAINTS_FILE = os.path.join(DATA_DIR, "complaints.csv")
-WORKERS_FILE = os.path.join(DATA_DIR, "workers.csv")
-
-# کد دسترسی مدیر — این فقط یک قفل نمادین برای Demo است، نه احراز هویت واقعی.
-# در نسخه اصلی باید با لاگین واقعی (نام کاربری/رمز یا SSO دانشگاه) جایگزین شود.
-ADMIN_PIN = "1234"
-
-COMPLAINT_COLUMNS = [
-    "id", "location", "description", "category", "safety", "affected_people",
-    "class_disruption", "waiting_time", "priority", "priority_level",
-    "status", "assigned_worker", "timestamp",
-]
-
-st.set_page_config(
-    page_title="سامانه خدمات دانشکده",
-    page_icon="🏫",
-    layout="centered",
-    initial_sidebar_state="collapsed",
+    compute_priority_score,
+    compute_waiting_time_multiplier,
+    priority_level
 )
 
-st.markdown(
-    """
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;700&display=swap');
-    html, body, [class*="css"]  { font-family: 'Vazirmatn', sans-serif; }
-    .main .block-container { direction: rtl; text-align: right; }
-    div[data-testid="stForm"] { direction: rtl; text-align: right; }
-    .stRadio > label, .stSelectbox > label, .stTextArea > label { direction: rtl; text-align: right; }
-    div[role="radiogroup"] { direction: rtl; }
-    .location-badge {
-        background: #EAF1F8; border: 1px solid #1C7293; color: #1E2761;
-        padding: 8px 16px; border-radius: 8px; display: inline-block;
-        font-weight: 600; margin-bottom: 12px;
-    }
-    .result-card {
-        background: #F2F6F9; border-radius: 12px; padding: 20px; margin-top: 12px;
-        border-right: 5px solid #1C7293;
-    }
-    .role-tag {
-        background: #1E2761; color: white; padding: 4px 12px; border-radius: 999px;
-        font-size: 12px; display: inline-block; margin-bottom: 10px;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.set_page_config(page_title="سامانه شکایات", layout="wide")
 
-# ============================================================
-# توابع کمکی ذخیره/بازیابی داده (مشترک بین هر سه نقش)
-# ============================================================
+# Title
+st.title("🏫 سامانه هوشمند مدیریت شکایات دانشکده")
 
-def load_complaints() -> pd.DataFrame:
-    if os.path.exists(COMPLAINTS_FILE):
-        df = pd.read_csv(COMPLAINTS_FILE, dtype=str)
-        if df.empty:
-            return pd.DataFrame(columns=COMPLAINT_COLUMNS)
-        for col in ["safety", "affected_people", "class_disruption", "waiting_time", "priority"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        return df
-    return pd.DataFrame(columns=COMPLAINT_COLUMNS)
+# Initialize session state
+if "complaints_data" not in st.session_state:
+    st.session_state.complaints_data = []
 
+# Calculate AHP weights
+ahp_result = compute_ahp_weights()
+weights = ahp_result["weights"]
 
-def save_complaints(df: pd.DataFrame):
-    df.to_csv(COMPLAINTS_FILE, index=False)
+st.markdown("---")
+st.header("📝 ثبت شکایت جدید")
 
-
-def load_workers() -> pd.DataFrame:
-    df = pd.read_csv(WORKERS_FILE, dtype=str)
-    df["distance"] = pd.to_numeric(df["distance"], errors="coerce")
-    return df
-
-
-def save_workers(df: pd.DataFrame):
-    df.to_csv(WORKERS_FILE, index=False)
-
-
-def next_complaint_id(df: pd.DataFrame) -> str:
-    if df.empty:
-        return "C001"
-    nums = df["id"].str.replace("C", "", regex=False).astype(int)
-    return f"C{nums.max() + 1:03d}"
-
-
-def try_assign_pending():
-    """تلاش مجدد برای تخصیص شکایاتی که هنوز نیرو نگرفته‌اند (پس از آزاد شدن یک کارمند)."""
-    complaints_df = load_complaints()
-    workers_df = load_workers()
-
-    pending = complaints_df[complaints_df["status"].isin(["Waiting", "Waiting for Worker"])]
-    if pending.empty:
-        return
-
-    complaints_list = [{"id": r["id"], "category": r["category"]} for _, r in pending.iterrows()]
-    workers_list = workers_df.to_dict("records")
-    result = assign_complaints(complaints_list, workers_list)
-
-    for cid, wid in result["assignments"].items():
-        complaints_df.loc[complaints_df["id"] == cid, "status"] = "Assigned"
-        complaints_df.loc[complaints_df["id"] == cid, "assigned_worker"] = wid
-        workers_df.loc[workers_df["worker_id"] == wid, "available"] = "مشغول"
-
-    if result["assignments"]:
-        save_complaints(complaints_df)
-        save_workers(workers_df)
-
-
-# ============================================================
-# نقش ۱: دانشجو / ثبت‌کننده شکایت   →   ?location=A11
-# فقط فرم ثبت و یک پیام نتیجه ساده؛ هیچ جزئیات مدل یا هویت کارکنان نمایش داده نمی‌شود.
-# ============================================================
-
-def render_citizen_page():
-    location = st.query_params.get("location", "A11")
-
-    st.markdown(f'<div class="location-badge">📍 مکان گزارش: کلاس {location}</div>', unsafe_allow_html=True)
-    st.title("سامانه مدیریت خدمات دانشکده")
-    st.caption(f"ثبت مشکل در کلاس {location}")
-
-    with st.form("complaint_form", clear_on_submit=False):
-        description = st.text_area(
-            "مشکل خود را توضیح دهید.",
-            placeholder="مثلاً: کولر کلاس خراب است و دمای کلاس بسیار بالاست.",
+# فرم ثبت شکایت
+with st.form("complaint_form"):
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        location = st.text_input(
+            "📍 مکان شکایت (مثل: اتاق A11، آزمایشگاه B3):",
+            value="A11",
+            help="مشخص کنید شکایت از کجا گزارش شده"
         )
-        category = st.selectbox("نوع مشکل", CATEGORY_OPTIONS)
+    
+    with col2:
+        category = st.selectbox(
+            "🔧 دسته‌بندی خدمات:",
+            CATEGORY_OPTIONS,
+            help="کدام بخش را نیاز است؟"
+        )
+    
+    # معیار ۱: ایمنی
+    st.subheader("1️⃣ معیار ایمنی")
+    safety_answer = st.radio(
+        "تأثیر بر ایمنی:",
+        list(SAFETY_OPTIONS.keys()),
+        help="میزان خطر ایمنی شکایت را انتخاب کنید"
+    )
+    safety_score = SAFETY_OPTIONS[safety_answer]
+    st.caption(f"✓ امتیاز: {safety_score}")
+    
+    # معیار ۲: اختلال در کلاس
+    st.subheader("2️⃣ معیار اختلال در کلاس")
+    disruption_answer = st.radio(
+        "تأثیر بر برگزاری کلاس:",
+        list(CLASS_DISRUPTION_OPTIONS.keys()),
+        help="آیا این شکایت کلاس را مختل می‌کند؟"
+    )
+    disruption_score = CLASS_DISRUPTION_OPTIONS[disruption_answer]
+    st.caption(f"✓ امتیاز: {disruption_score}")
+    
+    # معیار ۳: بحرانی‌بودن خدمت
+    st.subheader("3️⃣ معیار بحرانی‌بودن خدمت")
+    infrastructure_answer = st.radio(
+        "بحرانی‌بودن خدمت (اسیب به زیرساخت و داراییه):",
+        list(INFRASTRUCTURE_OPTIONS.keys()),
+        help="این شکایت چقدر بر زیرساخت دانشکده تأثیر میگذارد؟"
+    )
+    infrastructure_score = INFRASTRUCTURE_OPTIONS[infrastructure_answer]
+    st.caption(f"✓ امتیاز: {infrastructure_score}")
+    
+    # دکمهٔ ثبت
+    submitted = st.form_submit_button("✅ ثبت شکایت", use_container_width=True)
 
-        st.markdown("**این مشکل چه میزان تأثیری بر ایمنی افراد دارد؟**")
-        safety_label = st.radio("safety", list(SAFETY_OPTIONS.keys()), label_visibility="collapsed")
-
-        st.markdown("**چند نفر تحت تأثیر این مشکل قرار گرفته‌اند؟**")
-        affected_label = st.radio("affected", list(AFFECTED_PEOPLE_OPTIONS.keys()), label_visibility="collapsed")
-
-        st.markdown("**آیا این مشکل در برگزاری کلاس اختلال ایجاد کرده است؟**")
-        disruption_label = st.radio("disruption", list(CLASS_DISRUPTION_OPTIONS.keys()), label_visibility="collapsed")
-
-        submitted = st.form_submit_button("ثبت شکایت", use_container_width=True)
-
-    if not submitted:
-        return
-
-    if not description or not description.strip():
-        st.error("لطفاً توضیح مشکل را وارد کنید.")
-        st.stop()
-
-    complaints_df = load_complaints()
-    cid = next_complaint_id(complaints_df)
+if submitted:
     timestamp = datetime.now().isoformat()
-
-    safety = SAFETY_OPTIONS[safety_label]
-    affected = AFFECTED_PEOPLE_OPTIONS[affected_label]
-    disruption = CLASS_DISRUPTION_OPTIONS[disruption_label]
-    waiting = waiting_time_score(timestamp)
-
-    # --- محاسبات AHP/اولویت در پس‌زمینه انجام می‌شود؛ به کاربر نمایش داده نمی‌شود ---
-    weights = compute_ahp_weights()["weights"]
-    priority = compute_priority(safety, affected, disruption, waiting, weights)
-    level, emoji = priority_level(priority)
-
-    new_row = {
-        "id": cid, "location": location, "description": description.strip(),
-        "category": category, "safety": safety, "affected_people": affected,
-        "class_disruption": disruption, "waiting_time": waiting,
-        "priority": round(priority, 2), "priority_level": level,
-        "status": "Waiting", "assigned_worker": "", "timestamp": timestamp,
+    complaint_id = f"C{len(st.session_state.complaints_data) + 1:03d}"
+    
+    # محاسبه ضریب زمانی (در اینجا 0 روز = 1.0)
+    waiting_multiplier = compute_waiting_time_multiplier(timestamp)
+    
+    # محاسبه Priority Score
+    priority_score = compute_priority_score(
+        safety_score, 
+        disruption_score, 
+        infrastructure_score,
+        weights,
+        waiting_multiplier
+    )
+    
+    level_name, emoji = priority_level(priority_score)
+    
+    # ذخیره اطلاعات
+    complaint_data = {
+        "id": complaint_id,
+        "timestamp": timestamp,
+        "location": location,
+        "category": category,
+        "safety_score": safety_score,
+        "disruption_score": disruption_score,
+        "infrastructure_score": infrastructure_score,
+        "waiting_multiplier": waiting_multiplier,
+        "priority_score": priority_score,
+        "priority_level": level_name,
+        "status": "ثبت‌شده"
     }
-    complaints_df = pd.concat([complaints_df, pd.DataFrame([new_row])], ignore_index=True)
-    save_complaints(complaints_df)
+    
+    st.session_state.complaints_data.append(complaint_data)
+    
+    # نمایش نتیجه
+    st.success("✅ شکایت با موفقیت ثبت شد!")
+    
+    with st.container():
+        st.markdown("---")
+        st.subheader(f"{emoji} نتیجهٔ تحلیل")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("شناسهٔ شکایت", complaint_id)
+        with col2:
+            st.metric("اولویت", f"{priority_score:.2f}")
+        with col3:
+            st.metric("سطح", level_name)
+        with col4:
+            st.metric("ضریب زمانی", f"{waiting_multiplier:.1f}×")
+        
+        # جزئیات امتیازات
+        st.markdown("**تفکیک امتیازات:**")
+        score_df = pd.DataFrame([
+            {"معیار": "ایمنی", "امتیاز": safety_score, "وزن": f"{weights['Safety']:.3f}"},
+            {"معیار": "اختلال کلاس", "امتیاز": disruption_score, "وزن": f"{weights['Class_Disruption']:.3f}"},
+            {"معیار": "بحرانی‌بودن", "امتیاز": infrastructure_score, "وزن": f"{weights['Infrastructure_Criticality']:.3f}"},
+        ])
+        st.dataframe(score_df, use_container_width=True, hide_index=True)
+        
+        st.info(f"""
+        📊 **محاسبه:**
+        - Base Score = {weights['Safety']:.3f}×{safety_score} + {weights['Class_Disruption']:.3f}×{disruption_score} + {weights['Infrastructure_Criticality']:.3f}×{infrastructure_score}
+        - Base Score ≈ {priority_score / waiting_multiplier:.2f}
+        - Final Score = {priority_score / waiting_multiplier:.2f} × {waiting_multiplier:.1f} = **{priority_score:.2f}**
+        """)
 
-    with st.spinner("در حال ثبت و ارجاع درخواست..."):
-        time.sleep(0.6)
-        workers_df = load_workers()
-        result = assign_complaints([{"id": cid, "category": category}], workers_df.to_dict("records"))
-
-        if result["status"] == "assigned" and cid in result["assignments"]:
-            wid = result["assignments"][cid]
-            complaints_df.loc[complaints_df["id"] == cid, "status"] = "Assigned"
-            complaints_df.loc[complaints_df["id"] == cid, "assigned_worker"] = wid
-            workers_df.loc[workers_df["worker_id"] == wid, "available"] = "مشغول"
-            save_complaints(complaints_df)
-            save_workers(workers_df)
-            final_status_text = "در حال رسیدگی — نیروی مربوطه اطلاع‌رسانی شد"
-        else:
-            complaints_df.loc[complaints_df["id"] == cid, "status"] = "Waiting for Worker"
-            save_complaints(complaints_df)
-            final_status_text = "در صف انتظار — به‌محض آزاد شدن نیرو رسیدگی می‌شود"
-
-    # --- نمایش نتیجه: فقط اطلاعاتی که برای خودِ کاربر مربوط است، بدون هیچ جزئیات مدل یا هویت کارمند ---
-    st.markdown('<div class="result-card">', unsafe_allow_html=True)
-    st.success("✅ شکایت شما با موفقیت ثبت شد.")
-    st.write(f"**شماره پیگیری:** {cid}")
-    st.write(f"**مکان:** کلاس {location}")
-    st.write(f"**اولویت:** {emoji} {level}")
-    st.write(f"**وضعیت:** {final_status_text}")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-# ============================================================
-# نقش ۲: کارکنان خدمات   →   ?role=staff
-# فقط فهرست مأموریت‌های خودشان؛ بدون وزن‌های AHP، بدون فهرست کل شکایات دانشکده.
-# ============================================================
-
-def render_staff_page():
-    st.markdown('<span class="role-tag">👷 پنل کارکنان</span>', unsafe_allow_html=True)
-    st.title("پنل کارکنان خدمات")
-
-    workers_df = load_workers()
-    worker_options = {
-        f"{row.worker_id} — {row.name} ({row.skill})": row.worker_id
-        for row in workers_df.itertuples()
-    }
-    selected_label = st.selectbox("کارمند خود را انتخاب کنید", list(worker_options.keys()))
-    selected_wid = worker_options[selected_label]
-
-    if st.button("🔄 به‌روزرسانی"):
-        st.rerun()
-
-    complaints_df = load_complaints()
-    my_tasks = complaints_df[
-        (complaints_df["assigned_worker"] == selected_wid)
-        & (complaints_df["status"].isin(["Assigned", "In Progress"]))
-    ]
-
-    if my_tasks.empty:
-        st.info("در حال حاضر مأموریت جدیدی برای شما ثبت نشده است.")
-    else:
-        for _, task in my_tasks.iterrows():
-            with st.container(border=True):
-                st.markdown("### 🔔 درخواست جدید" if task["status"] == "Assigned" else "### 🔧 در حال انجام")
-                st.write(f"**شناسه:** {task['id']}")
-                st.write(f"**مکان:** کلاس {task['location']}")
-                st.write(f"**دسته‌بندی:** {task['category']}")
-                st.write(f"**اولویت:** {task['priority_level']}")
-                st.write(f"**شرح:** {task['description']}")
-
-                col1, col2 = st.columns(2)
-                if task["status"] == "Assigned":
-                    if col1.button("✅ پذیرش کار", key=f"accept_{task['id']}"):
-                        complaints_df.loc[complaints_df["id"] == task["id"], "status"] = "In Progress"
-                        save_complaints(complaints_df)
-                        st.rerun()
-                elif task["status"] == "In Progress":
-                    if col1.button("🏁 تکمیل کار", key=f"complete_{task['id']}"):
-                        complaints_df.loc[complaints_df["id"] == task["id"], "status"] = "Completed"
-                        save_complaints(complaints_df)
-                        workers_df.loc[workers_df["worker_id"] == selected_wid, "available"] = "آزاد"
-                        save_workers(workers_df)
-                        try_assign_pending()
-                        st.rerun()
-
-    try:
-        from streamlit_autorefresh import st_autorefresh
-        st_autorefresh(interval=8000, key="staff_panel_refresh")
-    except ImportError:
-        st.caption("برای به‌روزرسانی خودکار، کتابخانه streamlit-autorefresh را نصب کنید (اختیاری).")
-
-
-# ============================================================
-# نقش ۳: مدیر پروژه / داشبورد   →   ?role=admin
-# تمام جزئیات مدل AHP، مدل PuLP، فهرست کامل شکایات و کارکنان.
-# پشت یک کد دسترسی نمادین قرار دارد (فقط برای Demo، نه امنیت واقعی).
-# ============================================================
-
-def render_admin_page():
-    st.markdown('<span class="role-tag">🛠️ داشبورد مدیریت پروژه</span>', unsafe_allow_html=True)
-    st.title("داشبورد مدیریتی")
-
-    pin = st.text_input("کد دسترسی مدیر", type="password")
-    if pin != ADMIN_PIN:
-        st.warning("این صفحه فقط برای مدیر پروژه است. کد دسترسی را وارد کنید.")
-        st.caption("(این یک قفل نمادین برای Demo است؛ در نسخه اصلی باید با احراز هویت واقعی جایگزین شود.)")
-        st.stop()
-
-    st.success("✅ دسترسی مدیر تأیید شد.")
-
-    # ---- لینک‌های سه‌گانه برای استفاده در ارائه ----
-    with st.expander("🔗 لینک‌های هر نقش (برای دمو)", expanded=False):
-        st.code("لینک دانشجو:   <آدرس‌اپ>/?location=A11\nلینک کارکنان:   <آدرس‌اپ>/?role=staff\nلینک مدیر:      <آدرس‌اپ>/?role=admin")
-
+# نمایش داشبورد شکایات
+if st.session_state.complaints_data:
     st.markdown("---")
-    st.subheader("📐 مدل AHP — وزن معیارها")
-    ahp_result = compute_ahp_weights()
-    w_cols = st.columns(4)
-    for i, (name, w) in enumerate(ahp_result["weights"].items()):
-        w_cols[i].metric(name, f"{w:.3f}")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("λmax", f"{ahp_result['lambda_max']:.4f}")
-    c2.metric("CI", f"{ahp_result['CI']:.4f}")
-    c3.metric("CR", f"{ahp_result['CR']:.4f}")
-    if ahp_result["is_consistent"]:
-        st.success("✅ ماتریس مقایسه زوجی سازگار است (CR < 0.1).")
-    else:
-        st.error("❌ ماتریس ناسازگار است؛ باید مصاحبه خبرگان تکرار شود.")
+    st.header("📊 داشبورد شکایات")
+    
+    df = pd.DataFrame(st.session_state.complaints_data)
+    
+    # آمار کلی
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("تعداد شکایات", len(df))
+    with col2:
+        avg_score = df["priority_score"].mean()
+        st.metric("میانگین اولویت", f"{avg_score:.2f}")
+    with col3:
+        critical_count = len(df[df["priority_level"] == "بحرانی"])
+        st.metric("شکایات بحرانی", critical_count)
+    with col4:
+        low_count = len(df[df["priority_level"] == "پایین"])
+        st.metric("شکایات پایین", low_count)
+    
+    # جدول شکایات
+    st.subheader("📋 لیست شکایات")
+    display_df = df[["id", "location", "category", "priority_level", "priority_score", "status"]].copy()
+    display_df.columns = ["شناسه", "مکان", "دسته", "اولویت", "امتیاز", "وضعیت"]
+    
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    
+    # نمودار توزیع اولویت‌ها
+    st.subheader("📈 توزیع اولویت‌ها")
+    priority_counts = df["priority_level"].value_counts()
+    st.bar_chart(priority_counts)
 
-    with st.expander("مشاهده ماتریس مقایسه زوجی"):
-        from ahp import PAIRWISE_MATRIX, CRITERIA_NAMES
-        st.dataframe(pd.DataFrame(PAIRWISE_MATRIX, index=CRITERIA_NAMES, columns=CRITERIA_NAMES).round(3),
-                     use_container_width=True)
-
-    st.markdown("---")
-    st.subheader("⚙️ مدل تخصیص (PuLP)")
-    st.latex(r"\min Z = \sum_i \sum_j d_{ij} x_{ij}")
-    st.caption("محدودیت‌ها: هر شکایت واجدشرایط دقیقاً به یک کارمند تخصیص یابد؛ هر کارمند حداکثر یک کار؛ فقط زوج‌های هم‌تخصص و آزاد وارد مدل می‌شوند.")
-
-    st.markdown("---")
-    st.subheader("📋 فهرست کامل شکایات")
-    complaints_df = load_complaints()
-    if complaints_df.empty:
-        st.info("هنوز شکایتی ثبت نشده است.")
-    else:
-        st.dataframe(
-            complaints_df.sort_values("priority", ascending=False)[
-                ["id", "location", "category", "priority", "priority_level", "status", "assigned_worker", "timestamp"]
-            ],
-            use_container_width=True, hide_index=True,
-        )
-
-    st.markdown("---")
-    st.subheader("👷 وضعیت کارکنان")
-    workers_df = load_workers()
-    st.dataframe(workers_df, use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    with st.expander("🔗 تولید QR Code برای یک مکان"):
-        base_url = st.text_input("آدرس دمو (بعد از دیپلوی روی Streamlit Cloud اینجا بگذارید)", "https://your-app.streamlit.app")
-        loc_for_qr = st.text_input("شناسه مکان", "A11")
-        if st.button("تولید QR"):
-            try:
-                import qrcode
-                from io import BytesIO
-                qr_img = qrcode.make(f"{base_url}?location={loc_for_qr}")
-                buf = BytesIO()
-                qr_img.save(buf, format="PNG")
-                st.image(buf.getvalue(), width=220)
-            except ImportError:
-                st.error("کتابخانه qrcode نصب نیست: pip install qrcode[pil]")
-
-
-# ============================================================
-# مسیریابی بر اساس نقش (خواندن از query param — هیچ نوار کناری مشترکی وجود ندارد)
-# ============================================================
-
-role = st.query_params.get("role", "citizen")
-
-if role == "staff":
-    render_staff_page()
-elif role == "admin":
-    render_admin_page()
-else:
-    render_citizen_page()
+# اطلاعات AHP
+with st.expander("ℹ️ اطلاعات AHP و وزن‌ها"):
+    st.write("**وزن‌های معیارها:**")
+    weights_df = pd.DataFrame([
+        {"معیار": k, "وزن": f"{v:.4f}"} 
+        for k, v in weights.items()
+    ])
+    st.dataframe(weights_df, use_container_width=True, hide_index=True)
+    
+    st.write(f"**نسبت‌های تائید:**")
+    w = weights
+    ratios = f"""
+    - Safety : Class_Disruption = {w['Safety']/w['Class_Disruption']:.2f}:1 ✓
+    - Safety : Infrastructure = {w['Safety']/w['Infrastructure_Criticality']:.2f}:1 ✓
+    - Class_Disruption : Infrastructure = {w['Class_Disruption']/w['Infrastructure_Criticality']:.2f}:1 ✓
+    
+    **سازگاری:** CR = {ahp_result['CR']:.4f} {'✓ (سازگار)' if ahp_result['is_consistent'] else '❌ (نامناسب)'}
+    """
+    st.info(ratios)
